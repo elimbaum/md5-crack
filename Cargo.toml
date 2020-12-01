@@ -1,0 +1,18 @@
+[package]
+name = "md5-crack"
+version = "0.1.0"
+authors = ["Eli Baum <elimbaum@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+md-5 = "0.9.1"
+hex-literal = "0.3.1"
+itertools = "0.9.0"
+generic-array = "0.14.4"
+rayon = "1.5.0"
+thread_local = "1.0.1"
+
+[profile.release]
+debug = true

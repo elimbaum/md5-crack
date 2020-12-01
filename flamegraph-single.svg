@@ -1,0 +1,419 @@
+<?xml version="1.0" standalone="no"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg version="1.1" width="1200" height="310" onload="init(evt)" viewBox="0 0 1200 310" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><!--Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples.--><!--NOTES: --><defs><linearGradient id="background" y1="0" y2="1" x1="0" x2="0"><stop stop-color="#eeeeee" offset="5%"/><stop stop-color="#eeeeb0" offset="95%"/></linearGradient></defs><style type="text/css">
+text { font-family:"Verdana"; font-size:12px; fill:rgb(0,0,0); }
+#title { text-anchor:middle; font-size:17px; }
+#search { opacity:0.1; cursor:pointer; }
+#search:hover, #search.show { opacity:1; }
+#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+#unzoom { cursor:pointer; }
+#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+.hide { display:none; }
+.parent { opacity:0.5; }
+</style><script type="text/ecmascript"><![CDATA[var nametype = 'Function:';
+var fontsize = 12;
+var fontwidth = 0.59;
+var xpad = 10;
+var inverted = false;
+var searchcolor = 'rgb(230,0,230)';
+var fluiddrawing = true;
+var truncate_text_right = false;]]><![CDATA["use strict";
+var details, searchbtn, unzoombtn, matchedtxt, svg, searching, frames;
+function init(evt) {
+    details = document.getElementById("details").firstChild;
+    searchbtn = document.getElementById("search");
+    unzoombtn = document.getElementById("unzoom");
+    matchedtxt = document.getElementById("matched");
+    svg = document.getElementsByTagName("svg")[0];
+    frames = document.getElementById("frames");
+    searching = 0;
+
+    // Use GET parameters to restore a flamegraph's state.
+    var restore_state = function() {
+        var params = get_params();
+        if (params.x && params.y)
+            zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+        if (params.s)
+            search(params.s);
+    };
+
+    if (fluiddrawing) {
+        // Make width dynamic so the SVG fits its parent's width.
+        svg.removeAttribute("width");
+        // Edge requires us to have a viewBox that gets updated with size changes.
+        var isEdge = /Edge\/\d./i.test(navigator.userAgent);
+        if (!isEdge) {
+          svg.removeAttribute("viewBox");
+        }
+        var update_for_width_change = function() {
+            if (isEdge) {
+                svg.attributes.viewBox.value = "0 0 " + svg.width.baseVal.value + " " + svg.height.baseVal.value;
+            }
+
+            // Keep consistent padding on left and right of frames container.
+            frames.attributes.width.value = svg.width.baseVal.value - xpad * 2;
+
+            // Text truncation needs to be adjusted for the current width.
+            var el = frames.children;
+            for(var i = 0; i < el.length; i++) {
+                update_text(el[i]);
+            }
+
+            // Keep search elements at a fixed distance from right edge.
+            var svgWidth = svg.width.baseVal.value;
+            searchbtn.attributes.x.value = svgWidth - xpad - 100;
+            matchedtxt.attributes.x.value = svgWidth - xpad - 100;
+        };
+        window.addEventListener('resize', function() {
+            update_for_width_change();
+        });
+        // This needs to be done asynchronously for Safari to work.
+        setTimeout(function() {
+            unzoom();
+            update_for_width_change();
+            restore_state();
+        }, 0);
+    } else {
+        restore_state();
+    }
+}
+// event listeners
+window.addEventListener("click", function(e) {
+    var target = find_group(e.target);
+    if (target) {
+        if (target.nodeName == "a") {
+            if (e.ctrlKey === false) return;
+            e.preventDefault();
+        }
+        if (target.classList.contains("parent")) unzoom();
+        zoom(target);
+
+        // set parameters for zoom state
+        var el = target.querySelector("rect");
+        if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+            var params = get_params()
+            params.x = el.attributes._orig_x.value;
+            params.y = el.attributes.y.value;
+            history.replaceState(null, null, parse_params(params));
+        }
+    }
+    else if (e.target.id == "unzoom") {
+        unzoom();
+
+        // remove zoom state
+        var params = get_params();
+        if (params.x) delete params.x;
+        if (params.y) delete params.y;
+        history.replaceState(null, null, parse_params(params));
+    }
+    else if (e.target.id == "search") search_prompt();
+}, false)
+// mouse-over for info
+// show
+window.addEventListener("mouseover", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = nametype + " " + g_to_text(target);
+}, false)
+// clear
+window.addEventListener("mouseout", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = ' ';
+}, false)
+// ctrl-F for search
+window.addEventListener("keydown",function (e) {
+    if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+        e.preventDefault();
+        search_prompt();
+    }
+}, false)
+// functions
+function get_params() {
+    var params = {};
+    var paramsarr = window.location.search.substr(1).split('&');
+    for (var i = 0; i < paramsarr.length; ++i) {
+        var tmp = paramsarr[i].split("=");
+        if (!tmp[0] || !tmp[1]) continue;
+        params[tmp[0]]  = decodeURIComponent(tmp[1]);
+    }
+    return params;
+}
+function parse_params(params) {
+    var uri = "?";
+    for (var key in params) {
+        uri += key + '=' + encodeURIComponent(params[key]) + '&';
+    }
+    if (uri.slice(-1) == "&")
+        uri = uri.substring(0, uri.length - 1);
+    if (uri == '?')
+        uri = window.location.href.split('?')[0];
+    return uri;
+}
+function find_child(node, selector) {
+    var children = node.querySelectorAll(selector);
+    if (children.length) return children[0];
+    return;
+}
+function find_group(node) {
+    var parent = node.parentElement;
+    if (!parent) return;
+    if (parent.id == "frames") return node;
+    return find_group(parent);
+}
+function orig_save(e, attr, val) {
+    if (e.attributes["_orig_" + attr] != undefined) return;
+    if (e.attributes[attr] == undefined) return;
+    if (val == undefined) val = e.attributes[attr].value;
+    e.setAttribute("_orig_" + attr, val);
+}
+function orig_load(e, attr) {
+    if (e.attributes["_orig_"+attr] == undefined) return;
+    e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+    e.removeAttribute("_orig_" + attr);
+}
+function g_to_text(e) {
+    var text = find_child(e, "title").firstChild.nodeValue;
+    return (text)
+}
+function g_to_func(e) {
+    var func = g_to_text(e);
+    // if there's any manipulation we want to do to the function
+    // name before it's searched, do it here before returning.
+    return (func);
+}
+function update_text(e) {
+    var r = find_child(e, "rect");
+    var t = find_child(e, "text");
+    var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+    var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+    t.attributes.x.value = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+    // Smaller than this size won't fit anything
+    if (w < 2 * fontsize * fontwidth) {
+        t.textContent = "";
+        return;
+    }
+    t.textContent = txt;
+    // Fit in full text width
+    if (/^ *\$/.test(txt) || t.getComputedTextLength() < w)
+        return;
+    if (truncate_text_right) {
+        // Truncate the right side of the text.
+        for (var x = txt.length - 2; x > 0; x--) {
+            if (t.getSubStringLength(0, x + 2) <= w) {
+                t.textContent = txt.substring(0, x) + "..";
+                return;
+            }
+        }
+    } else {
+        // Truncate the left side of the text.
+        for (var x = 2; x < txt.length; x++) {
+            if (t.getSubStringLength(x - 2, txt.length) <= w) {
+                t.textContent = ".." + txt.substring(x, txt.length);
+                return;
+            }
+        }
+    }
+    t.textContent = "";
+}
+// zoom
+function zoom_reset(e) {
+    if (e.attributes != undefined) {
+        orig_load(e, "x");
+        orig_load(e, "width");
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_reset(c[i]);
+    }
+}
+function zoom_child(e, x, ratio) {
+    if (e.attributes != undefined) {
+        if (e.attributes.x != undefined) {
+            orig_save(e, "x");
+            e.attributes.x.value = format_percent((parseFloat(e.attributes.x.value) - x) * ratio);
+            if (e.tagName == "text") {
+                e.attributes.x.value = format_percent(parseFloat(find_child(e.parentNode, "rect[x]").attributes.x.value) + (100 * 3 / frames.attributes.width.value));
+            }
+        }
+        if (e.attributes.width != undefined) {
+            orig_save(e, "width");
+            e.attributes.width.value = format_percent(parseFloat(e.attributes.width.value) * ratio);
+        }
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_child(c[i], x, ratio);
+    }
+}
+function zoom_parent(e) {
+    if (e.attributes) {
+        if (e.attributes.x != undefined) {
+            orig_save(e, "x");
+            e.attributes.x.value = "0.0%";
+        }
+        if (e.attributes.width != undefined) {
+            orig_save(e, "width");
+            e.attributes.width.value = "100.0%";
+        }
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_parent(c[i]);
+    }
+}
+function zoom(node) {
+    var attr = find_child(node, "rect").attributes;
+    var width = parseFloat(attr.width.value);
+    var xmin = parseFloat(attr.x.value);
+    var xmax = xmin + width;
+    var ymin = parseFloat(attr.y.value);
+    var ratio = 100 / width;
+    // XXX: Workaround for JavaScript float issues (fix me)
+    var fudge = 0.001;
+    unzoombtn.classList.remove("hide");
+    var el = frames.children;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        var a = find_child(e, "rect").attributes;
+        var ex = parseFloat(a.x.value);
+        var ew = parseFloat(a.width.value);
+        // Is it an ancestor
+        if (!inverted) {
+            var upstack = parseFloat(a.y.value) > ymin;
+        } else {
+            var upstack = parseFloat(a.y.value) < ymin;
+        }
+        if (upstack) {
+            // Direct ancestor
+            if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+                e.classList.add("parent");
+                zoom_parent(e);
+                update_text(e);
+            }
+            // not in current path
+            else
+                e.classList.add("hide");
+        }
+        // Children maybe
+        else {
+            // no common path
+            if (ex < xmin || ex + fudge >= xmax) {
+                e.classList.add("hide");
+            }
+            else {
+                zoom_child(e, xmin, ratio);
+                update_text(e);
+            }
+        }
+    }
+}
+function unzoom() {
+    unzoombtn.classList.add("hide");
+    var el = frames.children;
+    for(var i = 0; i < el.length; i++) {
+        el[i].classList.remove("parent");
+        el[i].classList.remove("hide");
+        zoom_reset(el[i]);
+        update_text(el[i]);
+    }
+}
+// search
+function reset_search() {
+    var el = document.querySelectorAll("#frames rect");
+    for (var i = 0; i < el.length; i++) {
+        orig_load(el[i], "fill")
+    }
+    var params = get_params();
+    delete params.s;
+    history.replaceState(null, null, parse_params(params));
+}
+function search_prompt() {
+    if (!searching) {
+        var term = prompt("Enter a search term (regexp " +
+            "allowed, eg: ^ext4_)", "");
+        if (term != null) {
+            search(term)
+        }
+    } else {
+        reset_search();
+        searching = 0;
+        searchbtn.classList.remove("show");
+        searchbtn.firstChild.nodeValue = "Search"
+        matchedtxt.classList.add("hide");
+        matchedtxt.firstChild.nodeValue = ""
+    }
+}
+function search(term) {
+    var re = new RegExp(term);
+    var el = frames.children;
+    var matches = new Object();
+    var maxwidth = 0;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        var func = g_to_func(e);
+        var rect = find_child(e, "rect");
+        if (func == null || rect == null)
+            continue;
+        // Save max width. Only works as we have a root frame
+        var w = parseFloat(rect.attributes.width.value);
+        if (w > maxwidth)
+            maxwidth = w;
+        if (func.match(re)) {
+            // highlight
+            var x = parseFloat(rect.attributes.x.value);
+            orig_save(rect, "fill");
+            rect.attributes.fill.value = searchcolor;
+            // remember matches
+            if (matches[x] == undefined) {
+                matches[x] = w;
+            } else {
+                if (w > matches[x]) {
+                    // overwrite with parent
+                    matches[x] = w;
+                }
+            }
+            searching = 1;
+        }
+    }
+    if (!searching)
+        return;
+    var params = get_params();
+    params.s = term;
+    history.replaceState(null, null, parse_params(params));
+
+    searchbtn.classList.add("show");
+    searchbtn.firstChild.nodeValue = "Reset Search";
+    // calculate percent matched, excluding vertical overlap
+    var count = 0;
+    var lastx = -1;
+    var lastw = 0;
+    var keys = Array();
+    for (k in matches) {
+        if (matches.hasOwnProperty(k))
+            keys.push(k);
+    }
+    // sort the matched frames by their x location
+    // ascending, then width descending
+    keys.sort(function(a, b){
+        return a - b;
+    });
+    // Step through frames saving only the biggest bottom-up frames
+    // thanks to the sort order. This relies on the tree property
+    // where children are always smaller than their parents.
+    var fudge = 0.0001;    // JavaScript floating point
+    for (var k in keys) {
+        var x = parseFloat(keys[k]);
+        var w = matches[keys[k]];
+        if (x >= lastx + lastw - fudge) {
+            count += w;
+            lastx = x;
+            lastw = w;
+        }
+    }
+    // display matched percent
+    matchedtxt.classList.remove("hide");
+    var pct = 100 * count / maxwidth;
+    if (pct != 100) pct = pct.toFixed(1);
+    matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+}
+function format_percent(n) {
+    return n.toFixed(4) + "%";
+}
+]]></script><rect x="0" y="0" width="100%" height="310" fill="url(#background)"/><text id="title" x="50.0000%" y="24.00">Flame Graph</text><text id="details" x="10" y="293.00"> </text><text id="unzoom" class="hide" x="10" y="24.00">Reset Zoom</text><text id="search" x="1090" y="24.00">Search</text><text id="matched" x="1090" y="293.00"> </text><svg id="frames" x="10" width="1180"><g><title>libsystem_malloc.dylib`default_zone_free_definite_size (11 samples, 0.15%)</title><rect x="0.0000%" y="149" width="0.1451%" height="15" fill="rgb(227,0,7)"/><text x="0.2500%" y="159.50"></text></g><g><title>libsystem_malloc.dylib`szone_free_definite_size (17 samples, 0.22%)</title><rect x="0.2243%" y="149" width="0.2243%" height="15" fill="rgb(217,0,24)"/><text x="0.4743%" y="159.50"></text></g><g><title>libsystem_malloc.dylib`default_zone_free_definite_size (31 samples, 0.41%)</title><rect x="5.2382%" y="133" width="0.4090%" height="15" fill="rgb(221,193,54)"/><text x="5.4882%" y="143.50"></text></g><g><title>libsystem_malloc.dylib`szone_size (143 samples, 1.89%)</title><rect x="6.8743%" y="117" width="1.8868%" height="15" fill="rgb(248,212,6)"/><text x="7.1243%" y="127.50">l..</text></g><g><title>libsystem_malloc.dylib`tiny_size (125 samples, 1.65%)</title><rect x="7.1118%" y="101" width="1.6493%" height="15" fill="rgb(208,68,35)"/><text x="7.3618%" y="111.50"></text></g><g><title>libsystem_malloc.dylib`free (250 samples, 3.30%)</title><rect x="5.6472%" y="133" width="3.2986%" height="15" fill="rgb(232,128,0)"/><text x="5.8972%" y="143.50">lib..</text></g><g><title>libsystem_malloc.dylib`tiny_size (14 samples, 0.18%)</title><rect x="8.7611%" y="117" width="0.1847%" height="15" fill="rgb(207,160,47)"/><text x="9.0111%" y="127.50"></text></g><g><title>libsystem_malloc.dylib`tiny_free_list_add_ptr (225 samples, 2.97%)</title><rect x="16.6645%" y="101" width="2.9687%" height="15" fill="rgb(228,23,34)"/><text x="16.9145%" y="111.50">lib..</text></g><g><title>libsystem_malloc.dylib`free_tiny (842 samples, 11.11%)</title><rect x="8.9458%" y="133" width="11.1096%" height="15" fill="rgb(218,30,26)"/><text x="9.1958%" y="143.50">libsystem_malloc..</text></g><g><title>libsystem_malloc.dylib`tiny_free_no_lock (489 samples, 6.45%)</title><rect x="13.6034%" y="117" width="6.4520%" height="15" fill="rgb(220,122,19)"/><text x="13.8534%" y="127.50">libsyste..</text></g><g><title>libsystem_malloc.dylib`tiny_free_list_remove_ptr (32 samples, 0.42%)</title><rect x="19.6332%" y="101" width="0.4222%" height="15" fill="rgb(250,228,42)"/><text x="19.8832%" y="111.50"></text></g><g><title>libsystem_malloc.dylib`szone_free_definite_size (19 samples, 0.25%)</title><rect x="20.0554%" y="133" width="0.2507%" height="15" fill="rgb(240,193,28)"/><text x="20.3054%" y="143.50"></text></g><g><title>libsystem_malloc.dylib`tiny_free_no_lock (11 samples, 0.15%)</title><rect x="20.3985%" y="133" width="0.1451%" height="15" fill="rgb(216,20,37)"/><text x="20.6485%" y="143.50"></text></g><g><title>libsystem_platform.dylib`_platform_bzero$VARIANT$Haswell (70 samples, 0.92%)</title><rect x="24.1457%" y="117" width="0.9236%" height="15" fill="rgb(206,188,39)"/><text x="24.3957%" y="127.50"></text></g><g><title>md5-crack`&lt;D as digest::digest::Digest&gt;::finalize (2,860 samples, 37.74%)</title><rect x="20.6624%" y="133" width="37.7358%" height="15" fill="rgb(217,207,13)"/><text x="20.9124%" y="143.50">md5-crack`&lt;D as digest::digest::Digest&gt;::finalize</text></g><g><title>md5-crack`md5::utils::compress (2,526 samples, 33.33%)</title><rect x="25.0693%" y="117" width="33.3289%" height="15" fill="rgb(231,73,38)"/><text x="25.3193%" y="127.50">md5-crack`md5::utils::compress</text></g><g><title>md5-crack`&lt;D as digest::digest::Digest&gt;::update (107 samples, 1.41%)</title><rect x="58.3982%" y="133" width="1.4118%" height="15" fill="rgb(225,20,46)"/><text x="58.6482%" y="143.50"></text></g><g><title>libsystem_platform.dylib`_platform_memmove$VARIANT$Haswell (60 samples, 0.79%)</title><rect x="59.0183%" y="117" width="0.7917%" height="15" fill="rgb(210,31,41)"/><text x="59.2683%" y="127.50"></text></g><g><title>libsystem_malloc.dylib`_malloc_zone_malloc (9 samples, 0.12%)</title><rect x="62.3961%" y="117" width="0.1187%" height="15" fill="rgb(221,200,47)"/><text x="62.6461%" y="127.50"></text></g><g><title>libsystem_malloc.dylib`szone_size (169 samples, 2.23%)</title><rect x="63.8475%" y="101" width="2.2298%" height="15" fill="rgb(226,26,5)"/><text x="64.0975%" y="111.50">l..</text></g><g><title>libsystem_malloc.dylib`tiny_size (148 samples, 1.95%)</title><rect x="64.1246%" y="85" width="1.9528%" height="15" fill="rgb(249,33,26)"/><text x="64.3746%" y="95.50">l..</text></g><g><title>libsystem_malloc.dylib`free (278 samples, 3.67%)</title><rect x="62.5148%" y="117" width="3.6680%" height="15" fill="rgb(235,183,28)"/><text x="62.7648%" y="127.50">libs..</text></g><g><title>libsystem_malloc.dylib`tiny_size (8 samples, 0.11%)</title><rect x="66.0773%" y="101" width="0.1056%" height="15" fill="rgb(221,5,38)"/><text x="66.3273%" y="111.50"></text></g><g><title>libsystem_malloc.dylib`free_tiny (305 samples, 4.02%)</title><rect x="66.1829%" y="117" width="4.0243%" height="15" fill="rgb(247,18,42)"/><text x="66.4329%" y="127.50">libs..</text></g><g><title>md5-crack`__rdl_alloc (14 samples, 0.18%)</title><rect x="70.3523%" y="117" width="0.1847%" height="15" fill="rgb(241,131,45)"/><text x="70.6023%" y="127.50"></text></g><g><title>libsystem_malloc.dylib`szone_malloc_should_clear (785 samples, 10.36%)</title><rect x="72.1335%" y="85" width="10.3576%" height="15" fill="rgb(249,31,29)"/><text x="72.3835%" y="95.50">libsystem_mallo..</text></g><g><title>libsystem_malloc.dylib`tiny_malloc_should_clear (730 samples, 9.63%)</title><rect x="72.8592%" y="69" width="9.6319%" height="15" fill="rgb(225,111,53)"/><text x="73.1092%" y="79.50">libsystem_mall..</text></g><g><title>libsystem_malloc.dylib`tiny_malloc_from_free_list (146 samples, 1.93%)</title><rect x="80.5647%" y="53" width="1.9264%" height="15" fill="rgb(238,160,17)"/><text x="80.8147%" y="63.50">l..</text></g><g><title>libsystem_malloc.dylib`_malloc_zone_malloc (864 samples, 11.40%)</title><rect x="71.1967%" y="101" width="11.3999%" height="15" fill="rgb(214,148,48)"/><text x="71.4467%" y="111.50">libsystem_malloc...</text></g><g><title>libsystem_malloc.dylib`tiny_malloc_should_clear (8 samples, 0.11%)</title><rect x="82.4911%" y="85" width="0.1056%" height="15" fill="rgb(232,36,49)"/><text x="82.7411%" y="95.50"></text></g><g><title>libsystem_malloc.dylib`default_zone_malloc (43 samples, 0.57%)</title><rect x="82.5966%" y="101" width="0.5674%" height="15" fill="rgb(209,103,24)"/><text x="82.8466%" y="111.50"></text></g><g><title>md5-crack`&lt;alloc::string::String as core::iter::traits::collect::FromIterator&lt;char&gt;&gt;::from_iter (1,786 samples, 23.57%)</title><rect x="59.8100%" y="133" width="23.5651%" height="15" fill="rgb(229,88,8)"/><text x="60.0600%" y="143.50">md5-crack`&lt;alloc::string::String as c..</text></g><g><title>md5-crack`alloc::raw_vec::RawVec&lt;T,A&gt;::reserve (971 samples, 12.81%)</title><rect x="70.5634%" y="117" width="12.8117%" height="15" fill="rgb(213,181,19)"/><text x="70.8134%" y="127.50">md5-crack`alloc::ra..</text></g><g><title>libsystem_malloc.dylib`szone_malloc_should_clear (11 samples, 0.15%)</title><rect x="83.2300%" y="101" width="0.1451%" height="15" fill="rgb(254,191,54)"/><text x="83.4800%" y="111.50"></text></g><g><title>libsystem_malloc.dylib`_malloc_zone_malloc (13 samples, 0.17%)</title><rect x="85.0772%" y="117" width="0.1715%" height="15" fill="rgb(241,83,37)"/><text x="85.3272%" y="127.50"></text></g><g><title>libsystem_malloc.dylib`malloc (8 samples, 0.11%)</title><rect x="85.2487%" y="117" width="0.1056%" height="15" fill="rgb(233,36,39)"/><text x="85.4987%" y="127.50"></text></g><g><title>md5-crack`__rust_alloc (10 samples, 0.13%)</title><rect x="85.4730%" y="117" width="0.1319%" height="15" fill="rgb(226,3,54)"/><text x="85.7230%" y="127.50"></text></g><g><title>libsystem_malloc.dylib`set_tiny_meta_header_in_use (23 samples, 0.30%)</title><rect x="96.4639%" y="53" width="0.3035%" height="15" fill="rgb(245,192,40)"/><text x="96.7139%" y="63.50"></text></g><g><title>libsystem_malloc.dylib`szone_malloc_should_clear (799 samples, 10.54%)</title><rect x="87.0563%" y="85" width="10.5423%" height="15" fill="rgb(238,167,29)"/><text x="87.3063%" y="95.50">libsystem_mallo..</text></g><g><title>libsystem_malloc.dylib`tiny_malloc_should_clear (749 samples, 9.88%)</title><rect x="87.7161%" y="69" width="9.8826%" height="15" fill="rgb(232,182,51)"/><text x="87.9661%" y="79.50">libsystem_mall..</text></g><g><title>libsystem_malloc.dylib`tiny_malloc_from_free_list (62 samples, 0.82%)</title><rect x="96.7806%" y="53" width="0.8180%" height="15" fill="rgb(231,60,39)"/><text x="97.0306%" y="63.50"></text></g><g><title>libsystem_malloc.dylib`tiny_free_list_add_ptr (19 samples, 0.25%)</title><rect x="97.3479%" y="37" width="0.2507%" height="15" fill="rgb(208,69,12)"/><text x="97.5979%" y="47.50"></text></g><g><title>libsystem_malloc.dylib`_malloc_zone_malloc (868 samples, 11.45%)</title><rect x="86.2383%" y="101" width="11.4527%" height="15" fill="rgb(235,93,37)"/><text x="86.4883%" y="111.50">libsystem_malloc...</text></g><g><title>libsystem_malloc.dylib`default_zone_malloc (17 samples, 0.22%)</title><rect x="97.6910%" y="101" width="0.2243%" height="15" fill="rgb(213,116,39)"/><text x="97.9410%" y="111.50"></text></g><g><title>md5-crack`alloc::raw_vec::RawVec&lt;T,A&gt;::reserve (951 samples, 12.55%)</title><rect x="85.6050%" y="117" width="12.5478%" height="15" fill="rgb(222,207,29)"/><text x="85.8550%" y="127.50">md5-crack`alloc::ra..</text></g><g><title>libsystem_malloc.dylib`szone_malloc_should_clear (15 samples, 0.20%)</title><rect x="97.9549%" y="101" width="0.1979%" height="15" fill="rgb(206,96,30)"/><text x="98.2049%" y="111.50"></text></g><g><title>md5-crack`&lt;itertools::adaptors::multi_product::MultiProduct&lt;I&gt; as core::iter::traits::iterator::Iterator&gt;::next (1,170 samples, 15.44%)</title><rect x="83.3751%" y="133" width="15.4374%" height="15" fill="rgb(218,138,4)"/><text x="83.6251%" y="143.50">md5-crack`&lt;itertools::ad..</text></g><g><title>md5-crack`itertools::adaptors::multi_product::MultiProduct&lt;I&gt;::iterate_last (50 samples, 0.66%)</title><rect x="98.1528%" y="117" width="0.6597%" height="15" fill="rgb(250,191,14)"/><text x="98.4028%" y="127.50"></text></g><g><title>md5-crack`&lt;md5::Md5 as core::default::Default&gt;::default (29 samples, 0.38%)</title><rect x="98.8125%" y="133" width="0.3826%" height="15" fill="rgb(239,60,40)"/><text x="99.0625%" y="143.50"></text></g><g><title>md5-crack`__rdl_dealloc (8 samples, 0.11%)</title><rect x="99.2611%" y="133" width="0.1056%" height="15" fill="rgb(206,27,48)"/><text x="99.5111%" y="143.50"></text></g><g><title>md5-crack`alloc::raw_vec::RawVec&lt;T,A&gt;::reserve (10 samples, 0.13%)</title><rect x="99.4063%" y="133" width="0.1319%" height="15" fill="rgb(225,35,8)"/><text x="99.6563%" y="143.50"></text></g><g><title>md5-crack`itertools::adaptors::multi_product::MultiProduct&lt;I&gt;::iterate_last (8 samples, 0.11%)</title><rect x="99.5382%" y="133" width="0.1056%" height="15" fill="rgb(250,213,24)"/><text x="99.7882%" y="143.50"></text></g><g><title>md5-crack`&lt;core::iter::adapters::Map&lt;I,F&gt; as core::iter::traits::iterator::Iterator&gt;::try_fold (7,505 samples, 99.02%)</title><rect x="0.6333%" y="149" width="99.0236%" height="15" fill="rgb(247,123,22)"/><text x="0.8833%" y="159.50">md5-crack`&lt;core::iter::adapters::Map&lt;I,F&gt; as core::iter::traits::iterator::Iterator&gt;::try_fold</text></g><g><title>md5-crack`&lt;itertools::adaptors::multi_product::MultiProduct&lt;I&gt; as core::iter::traits::iterator::Iterator&gt;::next (11 samples, 0.15%)</title><rect x="99.6569%" y="149" width="0.1451%" height="15" fill="rgb(231,138,38)"/><text x="99.9069%" y="159.50"></text></g><g><title>md5-crack`std::rt::lang_start::_{{closure}} (7,578 samples, 99.99%)</title><rect x="0.0000%" y="181" width="99.9868%" height="15" fill="rgb(231,145,46)"/><text x="0.2500%" y="191.50">md5-crack`std::rt::lang_start::_{{closure}}</text></g><g><title>md5-crack`md5_crack::main (7,578 samples, 99.99%)</title><rect x="0.0000%" y="165" width="99.9868%" height="15" fill="rgb(251,118,11)"/><text x="0.2500%" y="175.50">md5-crack`md5_crack::main</text></g><g><title>md5-crack`__rdl_dealloc (10 samples, 0.13%)</title><rect x="99.8549%" y="149" width="0.1319%" height="15" fill="rgb(217,147,25)"/><text x="100.1049%" y="159.50"></text></g><g><title>all (7,579 samples, 100%)</title><rect x="0.0000%" y="261" width="100.0000%" height="15" fill="rgb(247,81,37)"/><text x="0.2500%" y="271.50"></text></g><g><title>md5-crack`0x1 (7,579 samples, 100.00%)</title><rect x="0.0000%" y="245" width="100.0000%" height="15" fill="rgb(209,12,38)"/><text x="0.2500%" y="255.50">md5-crack`0x1</text></g><g><title>libdyld.dylib`start (7,579 samples, 100.00%)</title><rect x="0.0000%" y="229" width="100.0000%" height="15" fill="rgb(227,1,9)"/><text x="0.2500%" y="239.50">libdyld.dylib`start</text></g><g><title>md5-crack`main (7,579 samples, 100.00%)</title><rect x="0.0000%" y="213" width="100.0000%" height="15" fill="rgb(248,47,43)"/><text x="0.2500%" y="223.50">md5-crack`main</text></g><g><title>md5-crack`std::rt::lang_start_internal (7,579 samples, 100.00%)</title><rect x="0.0000%" y="197" width="100.0000%" height="15" fill="rgb(221,10,30)"/><text x="0.2500%" y="207.50">md5-crack`std::rt::lang_start_internal</text></g></svg></svg>

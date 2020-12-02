@@ -1,11 +1,17 @@
+#![allow(unused_imports)]
 use md5::{Md5, Digest};
 use std::env;
 use std::iter;
+use std::str;
 use std::process;
+use std::borrow::BorrowMut;
 use std::time::Instant;
 use itertools::Itertools;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::cell::{RefCell, Cell};
+use thread_local::CachedThreadLocal;
 
 const _ASCIIALNUM : &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 const _ASCIILOWER : &str = "abcdefghijklmnopqrstuvwxyz";
@@ -43,55 +49,56 @@ fn main() {
     // create a Md5 hasher instance
     // let mut hasher = Md5::new();
 
-    let atm_hash_count = AtomicU64::new(0);
+    // let atm_hash_count = AtomicU64::new(0);
+    let mut main_hash_count = 0;
 
     let now = Instant::now();
+
+    // convert the source char set into bytes
+    // WARNING: THIS ONLY WORKS FOR ASCII (i.e. 1-byte chars)
+    let char_set = Vec::from(ASCIICHARS.as_bytes());
 
     let mut len = 1;
     let mut result = None;
     while let None = result {
-        // let thread_hash_counts = Arc::new(ThreadLocal::new());
+        let thread_hashers = CachedThreadLocal::new();
+        let thread_counts = CachedThreadLocal::new();
 
-        // i need cartesian product here, not perms
         println!("Trying {}-len strings", len);
-        result = iter::repeat(ASCIICHARS.chars())
+        result = iter::repeat(char_set.clone())
                     .take(len)
                     .multi_cartesian_product()
                     .par_bridge()
-                    .map(|x| x.into_iter().collect::<String>())
                     .find_any(|xs|
         {
-          // let xs = x.into_iter().collect::<String>();
-          // println!("{}", xs);
 
-          // if no count in this thread, make a new one; else increment
-          // let count = thread_hash_counts.get_or(|| Cell::new(0));
-          // count.set(count.get() + 1);
-
-          let mut hasher = Md5::new();
+          let mut hasher = thread_hashers.get_or(|| RefCell::new(Md5::new())).borrow_mut();
           hasher.update(&xs);
-          let result = hasher.finalize();
+          let result = hasher.finalize_reset();
 
-          atm_hash_count.fetch_add(1, Ordering::Relaxed);
+          let count = thread_counts.get_or(|| Cell::new(0));
+          count.set(count.get() + 1);
+
 
           return result.iter().zip(hash_bytes.iter()).all(|(&a, &b)| a == b);
         });
         len += 1;
 
-        // let thread_hash_counts = Arc::try_unwrap(thread_hash_counts).unwrap();
-        // main_hash_count += thread_hash_counts.into_iter().fold(0, |x, y| x + y.get());
+        main_hash_count += thread_counts.into_iter()
+                                        .inspect(|x| println!("{:?}", x))
+                                        .fold(0, |x, y| x + y.get());
     }
 
     let elapsed_ms = now.elapsed().as_millis();
 
     // println!("{}", result.unwrap().into_iter().collect::<String>());
-    println!("{}", result.unwrap());
+    println!("{}", String::from_utf8(result.unwrap()).unwrap());
 
-    let hash_count = atm_hash_count.into_inner();
+    // let hash_count = atm_hash_count.into_inner();
 
-    println!("{} hashes", hash_count);
+    println!("{} hashes", main_hash_count);
     println!("{} ms", elapsed_ms);
-    println!("{} hash/s", hash_count * 1000 / elapsed_ms as u64)
+    println!("{} hash/s", main_hash_count * 1000 / elapsed_ms as u64)
 
     // acquire hash digest in the form of GenericArray,
     // which in this case is equivalent to [u8; 16]

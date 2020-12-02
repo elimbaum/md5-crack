@@ -20,6 +20,11 @@ Usage:
 | pandas 	| 3a43b4f88325d94022c0efa9c2fa2f5a |
 | password  | 5f4dcc3b5aa765d61d8327deb882cf99 |
 
+## Speeds
+
+- Naive implementation (w/ strings): ~2M/sec
+- Using `[u8]`, single-threaded: ~3.5M/sec
+
 ## TODO
   - give each thread its own comparison hash
   - try with actual threads, real speedup?

@@ -68,8 +68,8 @@ fn main() {
         result = iter::repeat(char_set.clone())
                     .take(len)
                     .multi_cartesian_product()
-                    .par_bridge()
-                    .find_any(|xs|
+                    // .par_bridge()
+                    .find(|xs|
         {
 
           let mut hasher = thread_hashers.get_or(|| RefCell::new(Md5::new())).borrow_mut();
@@ -79,13 +79,12 @@ fn main() {
           let count = thread_counts.get_or(|| Cell::new(0));
           count.set(count.get() + 1);
 
-
           return result.iter().zip(hash_bytes.iter()).all(|(&a, &b)| a == b);
         });
         len += 1;
 
         main_hash_count += thread_counts.into_iter()
-                                        .inspect(|x| println!("{:?}", x))
+                                        // .inspect(|x| println!("{:?}", x))
                                         .fold(0, |x, y| x + y.get());
     }
 
